@@ -27,22 +27,22 @@ config.manager.check_alive_count = config.manager.check_alive_count || 10;
 config.manager.schedule_reserve_time = config.manager.schedule_reserve_time || 60 * 1000;
 config.manager.totalNode = config.manager.totalNode || 1;
 config.manager.electTimeout = config.manager.electTimeout || 1000;
+if (config.manager.electTimeout < 1000) {
+    log.error(`electTimeout is too low it must egt 1000ms`);
+    process.exit(1);
+}
 if(!config.manager.heartbeatTimeout){
     config.manager.heartbeatTimeout = config.manager.electTimeout;
 }
 if(!config.manager.leaderLeaseTimeout){
     config.manager.leaderLeaseTimeout = parseInt(config.manager.heartbeatTimeout/2);
 }
-if (config.manager.electTimeout < 100) {
-    log.error(`electTimeout is too low`);
+if (config.manager.heartbeatTimeout < 1000) {
+    log.error(`heartbeatTimeout is too low it must egt 1000ms`);
     process.exit(1);
 }
-if (config.manager.heartbeatTimeout < 100) {
-    log.error(`heartbeatTimeout is too low`);
-    process.exit(1);
-}
-if (config.manager.leaderLeaseTimeout < 100) {
-    log.error(`leaderLeaseTimeout is too low`);
+if (config.manager.leaderLeaseTimeout < 500) {
+    log.error(`leaderLeaseTimeout is too low it must egt 500ms`);
     process.exit(1);
 }
 

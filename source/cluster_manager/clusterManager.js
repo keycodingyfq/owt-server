@@ -926,6 +926,7 @@ var runAsFollower = function(topicChannel, manager) {
                 if (data.term > state.term) {
                     log.warn("follower receive a newer term data:", data, "self:", state);
                     state.term = data.term;
+                    observer.resetTimer();
                 }
 
                 //check if we've voted in this election before
@@ -933,8 +934,11 @@ var runAsFollower = function(topicChannel, manager) {
                     log.warn("follower duplicate requestVote for same term:", data.term, "data:", data, "self:", state);
                     if (state.lastVoteFor == data.id) {
                         responseVote(state.term, data.id, state.commitIndex, data.term, true);
+                        return
+                    } else if (!(state.lastVoteFor == state.id && state.prevLogIndex == DEFAULT_DATA && data.prevLogIndex != DEFAULT_DATA)) {
+                        responseVote(state.term, data.id, state.commitIndex, data.term, false);
+                        return
                     }
-                    return
                 }
 
                 //ignore the older node to become leader
@@ -1316,10 +1320,11 @@ var runAsCandidate = function(topicChannel, manager) {
                     log.warn("candidate duplicate requestVote for same term:", data.term, "data:", data, "self:", state);
                     if (state.lastVoteFor == data.id) {
                         responseVote(state.term, data.id, state.commitIndex, data.term, true);
-                    } else {
+                        return
+                    } else if (!(state.lastVoteFor == state.id && state.prevLogIndex == DEFAULT_DATA && data.prevLogIndex != DEFAULT_DATA)) {
                         responseVote(state.term, data.id, state.commitIndex, data.term, false);
+                        return
                     }
-                    return
                 }
 
                 //ignore the older node to become leader
@@ -1374,7 +1379,7 @@ var runAsCandidate = function(topicChannel, manager) {
                 if (state.prevLogIndex != DEFAULT_DATA) {
                     let prevLogTerm = state.prevLogTerm;
                     if (state.prevLogIndex == data.prevLogIndex) {
-                        prevLogTerm = data.prevLogTerm
+                        prevLogTerm = data.prevLogTerm;
                     }
 
                     if (prevLogTerm > data.prevLogTerm) {
@@ -1387,6 +1392,7 @@ var runAsCandidate = function(topicChannel, manager) {
                         return;
                     }
                 }
+                log.warn("candidate got heartbeat run as follower", "data:", data, "self:", state);
                 await changeRole("follower", data.term);
             }
         } catch (e) {
@@ -1421,9 +1427,9 @@ exports.manager = function (topicChannel, clusterName, id, spec) {
         manager = new ClusterManager(clusterName, id, spec);
         topicChannel.subscribe(['clusterManager.broadcast'], broadcastHandler, () => {
             state.id = manager.id;
-            state.totalNode = manager.totalNode || 1;
-            state.electTimeout = manager.electTimeout || 1000;
-            state.heartbeatTimeout = manager.heartbeatTimeout || 1000;
+            state.totalNode = manager.totalNode;
+            state.electTimeout = manager.electTimeout;
+            state.heartbeatTimeout = manager.heartbeatTimeout;
             state.leaderLeaseTimeout = manager.leaderLeaseTimeout || parseInt(state.heartbeatTimeout/2);
             state.minHeartTicket = parseInt(state.heartbeatTimeout / 10);
             state.quorum = parseInt(state.totalNode / 2) + 1;
