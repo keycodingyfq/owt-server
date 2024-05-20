@@ -687,7 +687,7 @@ const DEFAULT_DATA = -1; //Number.MIN_SAFE_INTEGER;
 var state = {
     term: DEFAULT_DATA, // current term
     leaderId: 0, // candidate and follower found leaderId
-    commitId: DEFAULT_DATA, //last sync data index
+    commitIndex: DEFAULT_DATA, //last sync data index
     lastVoteTerm: DEFAULT_DATA, // candidate last vote for other candidate term
     lastVoteFor: DEFAULT_DATA, // candidate last vote for other candidate.id
     voteNum: 0, //candidate laste got vote from other candidate
@@ -749,12 +749,19 @@ var runAsFollower = function(topicChannel, manager) {
 
     var installSnapshot = async function(data) {
         await installSnapshotMutex.lock("follower.installSnapshot");
-        if (!isInstallSnapshot) {
+        let prevLogTerm = state.prevLogTerm;
+        if (state.prevLogIndex != DEFAULT_DATA) {
+            if (state.prevLogIndex == data.prevLogIndex) {
+                prevLogTerm = data.prevLogTerm
+            }
+        }
+        if (!isInstallSnapshot && prevLogTerm <= data.prevLogTerm && state.prevLogIndex < data.prevLogIndex) {
             isInstallSnapshot = true;
             log.info("start installSnapshot last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
             topicChannel.publish(`clusterManager.leader.${state.leaderId}`, { type: 'installSnapshot', data: state });
             setTimeout(() => {
                 if (isInstallSnapshot) {
+                    log.fatal("timeout installSnapshot last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
                     isInstallSnapshot = false;
                     installSnapshotMutex.unlock();
                 }
@@ -815,14 +822,25 @@ var runAsFollower = function(topicChannel, manager) {
 
                 // Ignore an older term
                 if (state.term > data.term) {
-                    log.warn("ignoring installSnapshot request with older term than current term", "request-term", data.term, "current-term", state.term);
+                    log.fatal("ignoring installSnapshot request with older term than current term", "request-term", data.term, "current-term", state.term);
                     return
                 }
 
-                //leader is older then me might be it was the older leader
-                if (state.commitIndex > data.commitIndex) {
-                    log.fatal('installSnapshot failed commitIndex:', data.commitIndex, "my commitIndex:", state.commitIndex);
-                    return;
+                if (state.prevLogIndex != DEFAULT_DATA) {
+                    let prevLogTerm = state.prevLogTerm;
+                    if (state.prevLogIndex == data.prevLogIndex) {
+                        prevLogTerm = data.prevLogTerm
+                    }
+                    if (prevLogTerm > data.prevLogTerm) {
+                        log.fatal("installSnapshot ignore revious log term mis-match prevLogTerm:", data.prevLogTerm, "commitIndex:", data.commitIndex, "self:", state);
+                        return;
+                    }
+
+                    //leader is older then me might be it was the older leader
+                    if (prevLogTerm <= data.prevLogTerm && state.commitIndex > data.commitIndex) {
+                        log.fatal("candidate rejecting run as follower commitIndex is greater", "data:", data, "self:", state);
+                        return;
+                    }
                 }
 
                 //the last data id
@@ -833,9 +851,10 @@ var runAsFollower = function(topicChannel, manager) {
                 state.prevLogIndex = data.prevLogIndex;
                 //the pre data term
                 state.prevLogTerm = data.prevLogTerm;
-                log.info("installSnapshot last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
                 observer.resetTimer();
                 manager.setRuntimeData(data.data);
+                delete data.data;
+                log.info("installSnapshot last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
                 if (isInstallSnapshot) {
                     isInstallSnapshot = false;
                     installSnapshotMutex.unlock();
@@ -849,15 +868,26 @@ var runAsFollower = function(topicChannel, manager) {
 
                 // Ignore an older term
                 if (state.term > data.term) {
-                    log.warn("appendEntry ignore an older term:", data.term, "commitIndex:", data.commitIndex, "self:", state);
+                    log.fatal("appendEntry ignore an older term:", data.term, "commitIndex:", data.commitIndex, "self:", state);
                     return;
+                }
+
+                let prevLogTerm = state.prevLogTerm;
+                if (state.prevLogIndex != DEFAULT_DATA) {
+                    if (state.prevLogIndex == data.prevLogIndex) {
+                        prevLogTerm = data.prevLogTerm
+                    }
+                    if (prevLogTerm > data.prevLogTerm) {
+                        log.fatal("follower appendEntry ignore revious log term mis-match prevLogTerm:", data.prevLogTerm, "commitIndex:", data.commitIndex, "self:", state);
+                        return;
+                    }
                 }
 
                 observer.resetTimer();
                 state.leaderId = data.id;
                 state.term = data.term;
                 if (state.prevLogIndex != DEFAULT_DATA) {
-                    if ((state.prevLogTerm == data.prevLogTerm) && state.prevLogIndex == data.prevLogIndex) {
+                    if ((prevLogTerm == data.prevLogTerm) && state.prevLogIndex == data.prevLogIndex) {
                         state.prevLogTerm = data.term;
                         state.prevLogIndex = (++state.commitIndex);
                         manager.setUpdatedData(data.data);
@@ -866,8 +896,11 @@ var runAsFollower = function(topicChannel, manager) {
                         return;
                     }
                 }
-                log.warn("appendEntry warn commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", JSON.stringify(state), "data:", JSON.stringify(data));
-                installSnapshot(data);
+
+                if(!isInstallSnapshot){
+                    log.warn("appendEntry warn commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", JSON.stringify(state), "data:", JSON.stringify(data));
+                    installSnapshot(data);
+                }
             } else if (message.type === 'heartbeart') {
                 //if i not found the leader was loss ignore
                 if (state.leaderId != 0 && state.leaderId != data.id) {
@@ -877,17 +910,17 @@ var runAsFollower = function(topicChannel, manager) {
 
                 // Ignore an older term
                 if (state.term > data.term) {
-                    log.warn("follower heartbeart ignore an older term:", data.term, "commitIndex:", data.commitIndex, "self:", state);
+                    log.fatal("follower heartbeart ignore an older term:", data.term, "commitIndex:", data.commitIndex, "self:", state);
                     return;
                 }
 
+                let prevLogTerm = state.prevLogTerm;
                 if (state.prevLogIndex != DEFAULT_DATA) {
-                    let prevLogTerm = state.prevLogTerm;
                     if (state.prevLogIndex == data.prevLogIndex) {
                         prevLogTerm = data.prevLogTerm
                     }
                     if (prevLogTerm > data.prevLogTerm) {
-                        log.warn("follower heartbeart ignore revious log term mis-match prevLogTerm:", data.prevLogTerm, "commitIndex:", data.commitIndex, "self:", state);
+                        log.fatal("follower heartbeart ignore revious log term mis-match prevLogTerm:", data.prevLogTerm, "commitIndex:", data.commitIndex, "self:", state);
                         return;
                     }
                 }
@@ -898,14 +931,16 @@ var runAsFollower = function(topicChannel, manager) {
                 state.term = data.term;
                 responseHeartbeat(data);
                 if (oldLeaderId != state.leaderId) {
-                    log.debug("follower found new leader last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "data:", JSON.stringify(data));
-                    if (state.prevLogIndex != DEFAULT_DATA) {
-                        if ((state.prevLogTerm == data.prevLogTerm) && state.prevLogIndex == data.prevLogIndex) {
-                            return;
-                        }
+                    log.info("follower found new leader last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "data:", JSON.stringify(data));
+                }
+
+                if (state.prevLogIndex != DEFAULT_DATA) {
+                    if ((prevLogTerm == data.prevLogTerm) && state.prevLogIndex == data.prevLogIndex) {
+                        return;
                     }
+                }
+                if(!isInstallSnapshot){
                     installSnapshot(data);
-                    return;
                 }
             } else if (message.type === 'requestVote') {
                 //if i not found the leader was loss ignore
@@ -954,7 +989,7 @@ var runAsFollower = function(topicChannel, manager) {
                         return;
                     }
 
-                    if (state.prevLogTerm <= data.prevLogTerm && state.commitIndex > data.commitIndex) {
+                    if (prevLogTerm <= data.prevLogTerm && state.commitIndex > data.commitIndex) {
                         log.warn("follower rejecting vote request since our commitIndex is greater", "data:", data, "self:", state);
                         responseVote(state.term, data.id, state.commitIndex, data.term, false);
                         return;
@@ -1055,13 +1090,13 @@ var runAsLeader = function(topicChannel, manager) {
             if (message.type === 'installSnapshot') {
                 let followerId = message.data.id;
                 if (followerId === state.id) {
-                    log.error('installSnapshot follower:', followerId, "is yourself");
+                    log.fatal('installSnapshot follower:', followerId, "is yourself");
                     return;
                 }
 
                 let leaderId = message.data.leaderId;
                 if (leaderId !== state.id) {
-                    log.error('installSnapshot follower:', followerId, "leaderId:", leaderId, "no yourself:", state.id);
+                    log.fatal('installSnapshot follower:', followerId, "leaderId:", leaderId, "no yourself:", state.id);
                     return;
                 }
 
@@ -1115,9 +1150,9 @@ var runAsLeader = function(topicChannel, manager) {
                     }
                 } else {
                     if (diff <= 3* state.leaderLeaseTimeout) {
-                        log.warn("failed to contact", "followerId:", id, "time", diff)
+                        log.fatal("failed to contact", "followerId:", id, "time", diff);
                     } else {
-                        log.fatal("failed to contact", "followerId:", id, "time", diff)
+                        log.fatal("failed to contact", "followerId:", id, "time", diff);
                     }
                 }
             }
@@ -1172,14 +1207,14 @@ var runAsLeader = function(topicChannel, manager) {
                         state.prevLogIndex = state.commitIndex;
                         state.prevLogTerm = state.term;
                     });
-                    log.info('Run as leader success id:', state.id);
+                    log.info('Run as leader success id:', state.id, "term:", state.term, "commitIndex:", state.commitIndex);
                     resolve();
                 }, function(reason) {
-                    log.error('Cluster leader running as monitoring target failed, reason:', reason);
+                    log.fatal('Cluster leader running as monitoring target failed, reason:', reason);
                     process.kill(process.pid, 'SIGINT');
                 });
             }, function(reason) {
-                log.error('Cluster leader running as RPC server failed, reason:', util.inspect(reason));
+                log.fatal('Cluster leader running as RPC server failed, reason:', util.inspect(reason));
                 process.kill(process.pid, 'SIGINT');
             });
         });
@@ -1340,7 +1375,7 @@ var runAsCandidate = function(topicChannel, manager) {
                         return;
                     }
 
-                    if (state.prevLogTerm <= data.prevLogTerm && state.commitIndex > data.commitIndex) {
+                    if (prevLogTerm <= data.prevLogTerm && state.commitIndex > data.commitIndex) {
                         log.warn("candidate rejecting vote request since our commitIndex is greater", "data:", data, "self:", state);
                         responseVote(state.term, data.id, state.commitIndex, data.term, false);
                         return;
@@ -1383,12 +1418,12 @@ var runAsCandidate = function(topicChannel, manager) {
                     }
 
                     if (prevLogTerm > data.prevLogTerm) {
-                        log.warn("candidate rejecting run as follower since our prevLogTerm is greater", "data:", data, "self:", state);
+                        log.fatal("candidate rejecting run as follower since our prevLogTerm is greater", "data:", data, "self:", state);
                         return;
                     }
 
-                    if (state.prevLogTerm <= data.prevLogTerm && state.commitIndex > data.commitIndex) {
-                        log.warn("candidate rejecting run as follower commitIndex is greater", "data:", data, "self:", state);
+                    if (prevLogTerm <= data.prevLogTerm && state.commitIndex > data.commitIndex) {
+                        log.fatal("candidate rejecting run as follower commitIndex is greater", "data:", data, "self:", state);
                         return;
                     }
                 }
