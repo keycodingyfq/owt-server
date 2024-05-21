@@ -892,13 +892,13 @@ var runAsFollower = function(topicChannel, manager) {
                         state.prevLogIndex = (++state.commitIndex);
                         manager.setUpdatedData(data.data);
                         delete data.data;
-                        log.debug("appendEntry last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", JSON.stringify(state), "data:", JSON.stringify(data));
+                        log.debug("appendEntry last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
                         return;
                     }
                 }
 
                 if(!isInstallSnapshot){
-                    log.warn("appendEntry warn commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", JSON.stringify(state), "data:", JSON.stringify(data));
+                    log.warn("appendEntry warn commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
                     installSnapshot(data);
                 }
             } else if (message.type === 'heartbeart') {
@@ -931,7 +931,7 @@ var runAsFollower = function(topicChannel, manager) {
                 state.term = data.term;
                 responseHeartbeat(data);
                 if (oldLeaderId != state.leaderId) {
-                    log.info("follower found new leader last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "data:", JSON.stringify(data));
+                    log.info("follower found new leader last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "data:", data);
                 }
 
                 if (state.prevLogIndex != DEFAULT_DATA) {
@@ -970,7 +970,7 @@ var runAsFollower = function(topicChannel, manager) {
                     if (state.lastVoteFor == data.id) {
                         responseVote(state.term, data.id, state.commitIndex, data.term, true);
                         return
-                    } else if (!(state.lastVoteFor == state.id && state.prevLogIndex < data.prevLogIndex)) {
+                    } else if (!(state.lastVoteFor == state.id && state.commitIndex < data.commitIndex)) {
                         responseVote(state.term, data.id, state.commitIndex, data.term, false);
                         return
                     }
@@ -993,6 +993,13 @@ var runAsFollower = function(topicChannel, manager) {
                         log.warn("follower rejecting vote request since our commitIndex is greater", "data:", data, "self:", state);
                         responseVote(state.term, data.id, state.commitIndex, data.term, false);
                         return;
+                    }
+                }
+
+                if ((state.lastVoteTerm === data.term && state.lastVoteFor == state.id && state.commitIndex < data.commitIndex)) {
+                    log.warn("follower vote for other which has same term but commitIndex is greater commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
+                    if(state.voters.delete(state.id)){
+                        state.voteNum--;
                     }
                 }
 
@@ -1115,6 +1122,9 @@ var runAsLeader = function(topicChannel, manager) {
                     }
                 }
             }else if(message.type === 'responseHeartbeat'){
+                if(message.data.commitIndex > state.commitIndex){
+                    log.fatal('!!Dirty data!! ', "data:", message.data, "self:", state);
+                }
                 replState[message.data.id] = {lastContact: (new Date()).getTime()};
             }
         } catch (e) {
@@ -1356,7 +1366,7 @@ var runAsCandidate = function(topicChannel, manager) {
                     if (state.lastVoteFor == data.id) {
                         responseVote(state.term, data.id, state.commitIndex, data.term, true);
                         return
-                    } else if (!(state.lastVoteFor == state.id && state.prevLogIndex < data.prevLogIndex)) {
+                    } else if (!(state.lastVoteFor == state.id && state.commitIndex < data.commitIndex)) {
                         responseVote(state.term, data.id, state.commitIndex, data.term, false);
                         return
                     }
@@ -1382,6 +1392,13 @@ var runAsCandidate = function(topicChannel, manager) {
                     }
                 }
 
+                if ((state.lastVoteTerm === data.term && state.lastVoteFor == state.id && state.commitIndex < data.commitIndex )) {
+                    log.warn("candidate vote for other which has same term but commitIndex is greater commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
+                    if(state.voters.delete(state.id)){
+                        state.voteNum--;
+                    }
+                    await changeRole("follower", data.term);
+                }
                 state.lastVoteTerm = data.term;
                 state.lastVoteFor = data.id;
                 state.term = data.term;
