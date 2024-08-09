@@ -697,7 +697,7 @@ var state = {
     voters: new Set(), //who vote for me
     role: "follower",
     timestamp: (new Date()).getTime(),
-    maxDelay: 100
+    maxDelay: 200
 }
 
 var broadcastOnTopicMsg = null;
@@ -705,6 +705,7 @@ var broadcastOnTopicMsg = null;
 var runAsFollower = function(topicChannel, manager) {
     var isInstallSnapshot = false;
     var installSnapshotMutex = new Mutex();
+    var installSnapshotTimes = 0;
     state.role = "follower";
     state.timestamp = (new Date()).getTime();
 
@@ -778,7 +779,7 @@ var runAsFollower = function(topicChannel, manager) {
 
     var responseHeartbeat = function(data) {
         log.debug('follower Send responseHeartbeat..',"self:", state,"data:",data);
-        topicChannel.publish(`clusterManager.leader.${state.leaderId}`, { type: 'responseHeartbeat', data: state });
+        topicChannel.publish(`clusterManager.leader.${state.leaderId}`, { type: 'responseHeartbeat', data: Object.assign({},state,{timestamp:(new Date()).getTime()}) });
     }
 
     var needHandle = function(message) {
@@ -791,9 +792,9 @@ var runAsFollower = function(topicChannel, manager) {
             let current = (new Date()).getTime();
             let delay = current - data.timestamp;
             if (delay >= state.maxDelay) {
-                log.fatal(`[follower.${state.id}] got hear beat from [leader:${data.id}]: ${new Date(data.timestamp)}, delay: ${delay}ms`);
+                log.fatal(`[follower.${state.id}] got hear beat from [leader.${data.id}]: ${new Date(data.timestamp)}, delay: ${delay}ms`);
             } else {
-                log.debug(`[follower.${state.id}] got hear beat from [leader:${data.id}]: ${new Date(data.timestamp)}, delay: ${delay}ms`);
+                log.debug(`[follower.${state.id}] got hear beat from [leader.${data.id}]: ${new Date(data.timestamp)}, delay: ${delay}ms`);
             }
             return true
         }
@@ -851,10 +852,11 @@ var runAsFollower = function(topicChannel, manager) {
                 state.prevLogIndex = data.prevLogIndex;
                 //the pre data term
                 state.prevLogTerm = data.prevLogTerm;
+                installSnapshotTimes++;
                 observer.resetTimer();
                 manager.setRuntimeData(data.data);
                 delete data.data;
-                log.info("installSnapshot last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
+                log.info("installSnapshot last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "installSnapshotTimes:", installSnapshotTimes, "from:", data.id, "self:", state, "data:", data);
                 if (isInstallSnapshot) {
                     isInstallSnapshot = false;
                     installSnapshotMutex.unlock();
@@ -892,7 +894,7 @@ var runAsFollower = function(topicChannel, manager) {
                         state.prevLogIndex = (++state.commitIndex);
                         manager.setUpdatedData(data.data);
                         delete data.data;
-                        log.debug("appendEntry last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
+                        log.debug("appendEntry last commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "installSnapshotTimes:", installSnapshotTimes, "from:", data.id, "self:", state, "data:", data);
                         return;
                     }
                 }
@@ -961,7 +963,7 @@ var runAsFollower = function(topicChannel, manager) {
                 if (data.term > state.term) {
                     log.warn("follower receive a newer term data:", data, "self:", state);
                     state.term = data.term;
-                    observer.resetTimer();
+                    //observer.resetTimer();
                 }
 
                 //check if we've voted in this election before
@@ -997,9 +999,13 @@ var runAsFollower = function(topicChannel, manager) {
                 }
 
                 if ((state.lastVoteTerm === data.term && state.lastVoteFor == state.id && state.commitIndex < data.commitIndex)) {
-                    log.warn("follower vote for other which has same term but commitIndex is greater commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
                     if(state.voters.delete(state.id)){
+                        log.warn("follower vote for other which has same term but commitIndex is greater commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
                         state.voteNum--;
+                    }else{
+                        log.warn("follower rejecting vote request vote twice", "data:", data, "self:", state);
+                        responseVote(state.term, data.id, state.commitIndex, data.term, false);
+                        return;
                     }
                 }
 
@@ -1034,8 +1040,9 @@ var runAsLeader = function(topicChannel, manager) {
     state.role = "leader";
     state.timestamp = (new Date()).getTime();
     let checkLeaderLeaseTimer = undefined;
+    let gotHeartbearResponse = 0;
 
-    log.info('Run as leader id:', state.id, "self:", state);
+    log.info('Run as leader id:', state.id, "term:", state.term, "commitIndex:", state.commitIndex, "self:", state);
     var interval;
     var routerKeys = ["clusterManager.leader", `clusterManager.leader.${state.id}`];
 
@@ -1050,6 +1057,7 @@ var runAsLeader = function(topicChannel, manager) {
         state.leaderId = 0;
         state.role = newRole;
         checkLeaderLeaseTimer && clearTimeout(checkLeaderLeaseTimer);
+        checkLeaderLeaseTimer = undefined;
         interval && clearInterval(interval);
         manager.unserve();
         await topicChannel.unsubscribe(routerKeys);
@@ -1072,9 +1080,9 @@ var runAsLeader = function(topicChannel, manager) {
                 let current = (new Date()).getTime();
                 let delay = current - data.timestamp;
                 if (delay >= state.maxDelay) {
-                    log.fatal(`[leader.${state.id}] got hear beat from [leader:${data.id}]: ${new Date(data.timestamp)}, delay: ${delay}ms`);
+                    log.fatal(`[leader.${state.id}] got hear beat from [leader.${data.id}]: ${new Date(data.timestamp)}, delay: ${delay}ms`);
                 } else {
-                    log.debug(`[leader.${state.id}] got hear beat from [leader:${data.id}]: ${new Date(data.timestamp)}, delay: ${delay}ms`);
+                    log.debug(`[leader.${state.id}] got hear beat from [leader.${data.id}]: ${new Date(data.timestamp)}, delay: ${delay}ms`);
                 }
             } else if (data.term < state.term) {
                 return false;
@@ -1097,18 +1105,18 @@ var runAsLeader = function(topicChannel, manager) {
             if (message.type === 'installSnapshot') {
                 let followerId = message.data.id;
                 if (followerId === state.id) {
-                    log.fatal('installSnapshot follower:', followerId, "is yourself");
+                    log.fatal(`installSnapshot [follower.${followerId}] is yourself`);
                     return;
                 }
 
                 let leaderId = message.data.leaderId;
                 if (leaderId !== state.id) {
-                    log.fatal('installSnapshot follower:', followerId, "leaderId:", leaderId, "no yourself:", state.id);
+                    log.fatal(`installSnapshot [follower.${followerId}] [leader.${leaderId}] no yourself:`,state.id);
                     return;
                 }
 
                 manager.getRuntimeData(function(data) {
-                    log.info('installSnapshot follower:', followerId);
+                    log.info(`installSnapshot [follower.${followerId}]`);
                     data = Object.assign({ data, followerId }, state);
                     topicChannel.publish(`clusterManager.follower.${followerId}`, { type: 'installSnapshot', data: data });
                 });
@@ -1125,7 +1133,7 @@ var runAsLeader = function(topicChannel, manager) {
                 if(message.data.commitIndex > state.commitIndex){
                     log.fatal('!!Dirty data!! ', "data:", message.data, "self:", state);
                 }
-                replState[message.data.id] = {lastContact: (new Date()).getTime()};
+                replState[message.data.id] = Object.assign({}, message.data, {lastContact: (new Date()).getTime()});
             }
         } catch (e) {
             log.fatal(util.inspect(e));
@@ -1152,7 +1160,7 @@ var runAsLeader = function(topicChannel, manager) {
             let maxDiff = 0;
             for(let id in replState){
                 let diff = (new Date()).getTime()-replState[id].lastContact;
-                log.debug(`[leader.${state.id}] checkLeaderLease","leaderLeaseTimeout:",${leaderLeaseTimeout}`, "follower:", id, "diff:", diff);
+                log.debug(`[leader.${state.id}] checkLeaderLease","leaderLeaseTimeout:",${leaderLeaseTimeout}`, `[follower.${id}]:`, new Date(replState[id].timestamp), "diff:", diff);
                 if (diff <= state.leaderLeaseTimeout){
                     contacted++
                     if (diff > maxDiff) {
@@ -1160,9 +1168,9 @@ var runAsLeader = function(topicChannel, manager) {
                     }
                 } else {
                     if (diff <= 3* state.leaderLeaseTimeout) {
-                        log.fatal("failed to contact", "followerId:", id, "time", diff);
+                        log.fatal("failed to contact", `[follower.${id}]`, "time", diff);
                     } else {
-                        log.fatal("failed to contact", "followerId:", id, "time", diff);
+                        log.fatal("failed to contact", `[follower.${id}]`, id, "time", diff);
                     }
                 }
             }
@@ -1170,13 +1178,20 @@ var runAsLeader = function(topicChannel, manager) {
                 log.fatal(`failed to contact ${state.totalNode-contacted} of followers, stepping down`);
                 await changeRole("follower");
             }else{
+                gotHeartbearResponse++;
                 leaderLeaseTimeout = state.leaderLeaseTimeout - maxDiff;
                 if (leaderLeaseTimeout < 20) {
                     leaderLeaseTimeout = 20;
                 }
+                checkLeaderLeaseTimer && clearTimeout(checkLeaderLeaseTimer);
+                checkLeaderLeaseTimer = undefined;
                 checkLeaderLeaseTimer = setTimeout(()=>{
                     checkLeaderLease(leaderLeaseTimeout)
                 }, leaderLeaseTimeout);
+            }
+
+            if (gotHeartbearResponse == 1) {
+                runRpcServer();
             }
         }catch(e){
             log.fatal(util.inspect(e));
@@ -1194,6 +1209,34 @@ var runAsLeader = function(topicChannel, manager) {
         }, state.minHeartTicket);
     }
 
+    var runRpcServer = function(){
+        topicChannel.bus.asRpcServer(manager.name, manager.rpcAPI, (rpcSvr) => {
+            log.info('Run as asRpcServer.');
+            topicChannel.bus.asMonitoringTarget(function(monitoringTgt) {
+                log.info('Cluster leader is in service as leader!');
+                //start service
+                manager.serve(monitoringTgt);
+
+                //sync data to others
+                manager.registerDataUpdate(function(data) {
+                    state.commitIndex++;
+                    log.debug("registerDataUpdate last commitIndex:", state.commitIndex)
+                    data = Object.assign({}, { data }, state);
+                    topicChannel.publish('clusterManager.follower', { type: 'appendEntry', data: data });
+                    state.prevLogIndex = state.commitIndex;
+                    state.prevLogTerm = state.term;
+                });
+                log.info('Run as leader success id:', state.id, "term:", state.term, "commitIndex:", state.commitIndex);
+            }, function(reason) {
+                log.fatal('Cluster leader running as monitoring target failed, reason:', reason);
+                process.kill(process.pid, 'SIGINT');
+            });
+        }, function(reason) {
+            log.fatal('Cluster leader running as RPC server failed, reason:', util.inspect(reason));
+            process.kill(process.pid, 'SIGINT');
+        });
+    }
+
     leaderLoop();
     return new Promise((resolve) => {
         topicChannel.subscribe(routerKeys, onTopicMessage, function() {
@@ -1201,32 +1244,7 @@ var runAsLeader = function(topicChannel, manager) {
             checkLeaderLeaseTimer = setTimeout(()=>{
                 checkLeaderLease(state.leaderLeaseTimeout);
             },state.leaderLeaseTimeout);
-            topicChannel.bus.asRpcServer(manager.name, manager.rpcAPI, (rpcSvr) => {
-                log.info('Run as asRpcServer.');
-                topicChannel.bus.asMonitoringTarget(function(monitoringTgt) {
-                    log.info('Cluster leader is in service as leader!');
-                    //start service
-                    manager.serve(monitoringTgt);
-
-                    //sync data to others
-                    manager.registerDataUpdate(function(data) {
-                        state.commitIndex++;
-                        log.debug("registerDataUpdate last commitIndex:", state.commitIndex)
-                        data = Object.assign({}, { data }, state);
-                        topicChannel.publish('clusterManager.follower', { type: 'appendEntry', data: data });
-                        state.prevLogIndex = state.commitIndex;
-                        state.prevLogTerm = state.term;
-                    });
-                    log.info('Run as leader success id:', state.id, "term:", state.term, "commitIndex:", state.commitIndex);
-                    resolve();
-                }, function(reason) {
-                    log.fatal('Cluster leader running as monitoring target failed, reason:', reason);
-                    process.kill(process.pid, 'SIGINT');
-                });
-            }, function(reason) {
-                log.fatal('Cluster leader running as RPC server failed, reason:', util.inspect(reason));
-                process.kill(process.pid, 'SIGINT');
-            });
+            resolve();
         });
     });
 };
@@ -1335,6 +1353,7 @@ var runAsCandidate = function(topicChannel, manager) {
 
     var onTopicMessage = async function(message) {
         await mutex.lock(`candidate.onTopicMessage.${message.type}`, message);
+        let newState = false;
         try {
             if (isStop) {
                 log.warn('candidate cycle in is stop', "self:", state);
@@ -1357,7 +1376,7 @@ var runAsCandidate = function(topicChannel, manager) {
 
                 if (data.term > state.term) {
                     log.warn("candidate receive a newer term i run as follower", "data:", data, "self:", state);
-                    await changeRole("follower", data.term);
+                    newState = {role: "follower", term: data.term};
                 }
 
                 //check if we've voted in this election before
@@ -1393,11 +1412,15 @@ var runAsCandidate = function(topicChannel, manager) {
                 }
 
                 if ((state.lastVoteTerm === data.term && state.lastVoteFor == state.id && state.commitIndex < data.commitIndex )) {
-                    log.warn("candidate vote for other which has same term but commitIndex is greater commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
                     if(state.voters.delete(state.id)){
+                        log.warn("candidate vote for other which has same term but commitIndex is greater commitIndex:", state.commitIndex, "data.commitIndex:", data.commitIndex, "from:", data.id, "self:", state, "data:", data);
                         state.voteNum--;
+                        newState = {role: "follower", term: data.term};
+                    }else{
+                        log.warn("candidate rejecting vote request vote twice", "data:", data, "self:", state);
+                        responseVote(state.term, data.id, state.commitIndex, data.term, false);
+                        return;
                     }
-                    await changeRole("follower", data.term);
                 }
                 state.lastVoteTerm = data.term;
                 state.lastVoteFor = data.id;
@@ -1413,7 +1436,7 @@ var runAsCandidate = function(topicChannel, manager) {
                 if (data.term > state.term && data.id == state.id && data.voteForTerm == state.term) {
                     resetTimer("responseVote change as follower");
                     log.warn("candidate newer term discovered, fallback to follower", "data:", data, "self:", state);
-                    await changeRole("follower", data.term);
+                    newState = {role: "follower", term: data.term};
                     return;
                 }
 
@@ -1423,7 +1446,7 @@ var runAsCandidate = function(topicChannel, manager) {
                     if ((++state.voteNum) >= state.quorum) {
                         resetTimer("responseVote got vote");
                         log.info(`candidate got vote:${state.voteNum} run as leader`, "data:", data, "self:", state);
-                        await changeRole("leader", state.term);
+                        newState = {role: "leader", term: state.term};
                     }
                 }
             } else if (message.type === 'heartbeart') {
@@ -1445,11 +1468,14 @@ var runAsCandidate = function(topicChannel, manager) {
                     }
                 }
                 log.warn("candidate got heartbeat run as follower", "data:", data, "self:", state);
-                await changeRole("follower", data.term);
+                newState = {role: "follower", term: data.term};
             }
         } catch (e) {
             log.fatal(util.inspect(e));
         } finally {
+            if (newState !== false) {
+                await changeRole(newState.role, newState.term);
+            }
             mutex.unlock();
         }
     };
